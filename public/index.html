@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OmniOS-Pilot — Multimodal Desktop Vision & OS Automation Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- TOPBAR -->
+    <header class="app-topbar">
+      <div class="topbar-left">
+        <div class="app-logo">
+          <span class="logo-icon">🖥️</span>
+          <div class="logo-text">
+            <span class="logo-title">OmniOS-Pilot</span>
+            <span class="logo-badge">Vision Grounding v1.0</span>
+          </div>
+        </div>
+        <div class="topbar-chips">
+          <span class="chip chip-vision">👁️ UI-TARS / ShowUI Grounding</span>
+          <span class="chip chip-driver">🖱️ Native CoreGraphics (8ms)</span>
+          <span class="chip chip-safety" id="chip-safety-status">🛡️ Safety: Active</span>
+          <span class="chip chip-competitors">📊 5 Top Competitors Tracked</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <nav class="topbar-tabs">
+          <button class="nav-tab active" data-tab="pilot">🖥️ Live Desktop Vision Pilot</button>
+          <button class="nav-tab" data-tab="safety">🛡️ Safety & Panic Switch</button>
+          <button class="nav-tab" data-tab="competitors">📊 5 Competitor Matrix</button>
+        </nav>
+      </div>
+    </header>
+
+    <!-- CONTENT -->
+    <main class="app-content">
+      <!-- TAB 1: LIVE DESKTOP VISION PILOT -->
+      <section id="tab-pilot" class="tab-pane active">
+        <div class="pilot-layout-grid">
+          <!-- Left: Live Screen Viewport with Bounding Box Canvas -->
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">🖥️ Live Screen Viewport (Visual Grounding Overlay)</span>
+              <span class="badge-nominal" id="badge-grounding-acc">97.4% Accuracy</span>
+            </div>
+            <div class="screen-canvas-container">
+              <canvas id="screen-viewport-canvas" width="600" height="340"></canvas>
+            </div>
+            <div style="padding: 14px; display: flex; flex-direction: column; gap: 10px;">
+              <label class="form-label">High-Level Autonomous Desktop Goal:</label>
+              <div style="display: flex; gap: 10px;">
+                <input type="text" id="input-pilot-goal" class="form-control" value="Apri il Finder e cerca la fattura di Agosto">
+                <button class="btn btn-primary" id="btn-plan-action">👁️ Analyze & Plan</button>
+                <button class="btn btn-action" id="btn-execute-action">🖱️ Execute Action</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Action Plan & Telemetry -->
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">📋 Grounding Plan & Step Decomposition</span>
+              <span class="badge-telemetry" id="badge-target-coords">(890, 338) Click</span>
+            </div>
+            <div class="plan-details-box" id="plan-details-container">
+              <!-- Dynamically populated -->
+            </div>
+            <pre class="driver-terminal" id="driver-execution-output">// Native mouse/keyboard driver output will appear here...</pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: SAFETY & PANIC SWITCH -->
+      <section id="tab-safety" class="tab-pane">
+        <div class="pilot-layout-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">🛑 Hardware Emergency Panic Switch</span>
+            </div>
+            <div style="padding: 20px; display: flex; flex-direction: column; gap: 16px; align-items: center; justify-content: center; height: 100%;">
+              <p style="font-size: 13px; color: var(--text-muted); text-align: center; max-width: 400px;">
+                Premere il pulsante di emergenza congela istantaneamente qualsiasi movimento del mouse o pressione dei tasti sul sistema operativo.
+              </p>
+              <button class="btn btn-panic" id="btn-panic-stop">🚨 EMERGENCY PANIC STOP</button>
+              <button class="btn btn-secondary" id="btn-safety-reset">✓ Reset & Resume Safety</button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">🛡️ Safety Invariants & Guard Rails</span>
+            </div>
+            <div style="padding: 16px; font-size: 12.5px; color: var(--text-muted); line-height: 1.6;">
+              <p><strong style="color: #fff;">Regole di Sicurezza di OmniOS-Pilot:</strong></p>
+              <p>• <strong>Zero Privileged Deletions:</strong> Nessun comando <code>rm -rf</code> o <code>sudo</code> può essere inviato senza approvazione umana esplicita.</p>
+              <p>• <strong>Visual Pre-Flight Confirmation:</strong> I box di puntamento vengono mostrati a schermo prima dell'esecuzione del click.</p>
+              <p>• <strong>100% Privacy Locale:</strong> Il modello visivo e il driver CoreGraphics girano direttamente sul Mac senza inviare catture dello schermo nel cloud.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: 5 COMPETITOR BENCHMARK -->
+      <section id="tab-competitors" class="tab-pane">
+        <div class="panel" style="height: 100%;">
+          <div class="panel-header">
+            <span class="panel-title">📊 Comprehensive Comparison: OmniOS-Pilot vs Top 5 Competitors</span>
+          </div>
+          <div class="table-container" id="competitor-table-container">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

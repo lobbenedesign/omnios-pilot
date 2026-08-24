@@ -1,0 +1,11 @@
+{
+  "name": "omnios-pilot",
+  "version": "1.0.0",
+  "description": "Multimodal Vision-Language Desktop Automation Agent with Pixel-Coordinate Visual Grounding and Safety Rails",
+  "type": "module",
+  "main": "server.ts",
+  "scripts": {
+    "start": "bun server.ts"
+  },
+  "dependencies": {}
+}

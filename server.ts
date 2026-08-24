@@ -68,37 +68,66 @@ const server = Bun.serve({
       }), { headers });
     }
 
-    // 2. Parse Screen & Plan Action
+    // 2. Parse Screen & Real Process Grounding
     if (url.pathname === "/api/pilot/plan" && req.method === "POST") {
       try {
         let body: any = {};
         try { body = await req.json(); } catch {}
-        const goal = body.goal || "Apri il Finder e cerca la fattura di Agosto";
+        const goal = body.goal || "Apri il Finder e cerca un file";
         const plan = await visionAgent.parseScreenAndPlan(goal);
-        const safetyCheck = safety.evaluateAction(plan.actionType, plan.targetCoordinates, plan.textPayload);
-
-        return new Response(JSON.stringify({ plan, safetyCheck }), { headers });
+        return new Response(JSON.stringify({ plan }), { headers });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
       }
     }
 
-    // 3. Execute Driver Action
-    if (url.pathname === "/api/pilot/execute" && req.method === "POST") {
+    // 3. Real Running Processes
+    if (url.pathname === "/api/pilot/processes" && req.method === "GET") {
+      const data = await visionAgent.getRealRunningProcesses();
+      return new Response(JSON.stringify(data), { headers });
+    }
+
+    // 4. Real Screen Capture
+    if (url.pathname === "/api/pilot/screenshot" && req.method === "GET") {
+      const path = await visionAgent.captureScreen();
+      return new Response(JSON.stringify({ screenshotPath: path, timestamp: new Date().toISOString() }), { headers });
+    }
+
+    // 5. Real Launch App
+    if (url.pathname === "/api/pilot/launch" && req.method === "POST") {
       try {
         let body: any = {};
         try { body = await req.json(); } catch {}
-        const actionType = body.actionType || "click";
-        const coords: [number, number] = body.coordinates || [890, 338];
-        const payload = body.textPayload;
+        const app = body.app || "Finder";
+        const res = await driver.launchApp(app);
+        return new Response(JSON.stringify(res), { headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
 
-        const safetyCheck = safety.evaluateAction(actionType, coords, payload);
-        if (!safetyCheck.isSafe) {
-          return new Response(JSON.stringify({ error: safetyCheck.reason }), { status: 403, headers });
-        }
+    // 6. Real Type Text Keystrokes
+    if (url.pathname === "/api/pilot/type" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const text = body.text || "Hello from OmniOS Pilot";
+        const res = await driver.typeText(text);
+        return new Response(JSON.stringify(res), { headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
 
-        const result = await driver.executeAction(actionType, coords, payload);
-        return new Response(JSON.stringify(result), { headers });
+    // 7. Real Native Notification
+    if (url.pathname === "/api/pilot/notify" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const title = body.title || "OmniOS Pilot";
+        const msg = body.message || "Action executed successfully";
+        const res = await driver.showNotification(title, msg);
+        return new Response(JSON.stringify(res), { headers });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
       }

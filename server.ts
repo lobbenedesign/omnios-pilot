@@ -8,6 +8,8 @@ import { VisionGroundingAgent } from "./src/vision_agent";
 import { MouseKeyboardDriver } from "./src/mouse_keyboard_driver";
 import { SafetyGuard } from "./src/safety_guard";
 import { OSCompetitorBenchmark } from "./src/competitor_benchmark";
+import { ActionHistoryLog } from "./src/action_history";
+import { computePixelDiff } from "./src/verification";
 import { join } from "path";
 import { existsSync } from "fs";
 
@@ -17,6 +19,58 @@ const visionAgent = new VisionGroundingAgent();
 const driver = new MouseKeyboardDriver();
 const safety = new SafetyGuard();
 const benchmark = new OSCompetitorBenchmark();
+const history = new ActionHistoryLog();
+
+/**
+ * Real observe-act-verify wrapper around a single driver call: captures a
+ * genuine "before" screenshot, runs the action, waits briefly for the UI to
+ * settle, captures a genuine "after" screenshot, computes a real pixel diff
+ * between the two files, and (if Ollama is reachable) captions the "after"
+ * screenshot. See src/verification.ts for what this honestly does and does
+ * not prove.
+ */
+async function runWithVerification(run: () => Promise<any>) {
+  // Distinct paths for "before" and "after" - captureScreen() defaults to a
+  // single fixed path, and using it for both captures would silently
+  // overwrite the "before" file with the "after" one before it could be
+  // diffed (a real bug hit during manual testing of this feature; the diff
+  // always reported 0% changed because both variables pointed at the same
+  // file on disk). The "after" capture also refreshes the fixed path the UI
+  // polls via /api/pilot/screenshot-file, so the dashboard still shows the
+  // latest real screen state.
+  const before = await visionAgent.captureScreen("/tmp/omnios_verify_before.png");
+  const result = await run();
+  await Bun.sleep(500); // let the UI settle before the "after" capture
+  const after = await visionAgent.captureScreen(); // default fixed path, also used by the UI
+
+  let diff: Awaited<ReturnType<typeof computePixelDiff>> = {
+    changedPixelPercent: null, width: null, height: null, method: "unavailable", error: "before/after screenshot missing"
+  };
+  if (before && after) {
+    diff = await computePixelDiff(before, after);
+  }
+
+  let afterDescription: string | null = null;
+  let visionModelUsed: string | null = null;
+  if (after) {
+    const vision = await visionAgent.describeScreenWithOllama(after);
+    afterDescription = vision.description;
+    visionModelUsed = vision.model;
+  }
+
+  return {
+    result,
+    verification: {
+      beforeScreenshot: before,
+      afterScreenshot: after,
+      changedPixelPercent: diff.changedPixelPercent,
+      diffMethod: diff.method,
+      diffError: diff.error,
+      afterDescription,
+      visionModelUsed
+    }
+  };
+}
 
 console.log(`\n======================================================`);
 console.log(`🖥️ OMNIOS-PILOT running on http://localhost:${PORT}`);
@@ -107,6 +161,7 @@ const server = Bun.serve({
         const actionType: string = body.actionType || "inspect_windows";
         const target: string = body.target || "Finder";
         const textPayload: string | undefined = body.textPayload;
+        const wantVerify: boolean = Boolean(body.verify);
 
         const coordsForCheck: [number, number] = Array.isArray(body.coordinates) ? [body.coordinates[0], body.coordinates[1]] : [0, 0];
         const check = safety.evaluateAction(actionType, coordsForCheck, textPayload);
@@ -114,31 +169,54 @@ const server = Bun.serve({
           return new Response(JSON.stringify({ error: check.reason, safetyCheck: check }), { status: 403, headers });
         }
 
+        const dispatch = async (): Promise<any> => {
+          if (actionType === "activate_app") {
+            return await driver.launchApp(target);
+          } else if (actionType === "keystroke") {
+            return await driver.typeText(textPayload || "");
+          } else if (actionType === "click") {
+            const [cx, cy] = Array.isArray(body.coordinates) ? body.coordinates : [0, 0];
+            return await driver.clickAt(cx, cy, target || undefined);
+          } else if (actionType === "double_click") {
+            const [cx, cy] = Array.isArray(body.coordinates) ? body.coordinates : [0, 0];
+            return await driver.doubleClickAt(cx, cy, target || undefined);
+          } else if (actionType === "notify") {
+            return await driver.showNotification("OmniOS Pilot", textPayload || "Action executed");
+          } else {
+            // inspect_windows / unknown: nothing destructive to dispatch, just report frontmost app.
+            const frontmost = await driver.getFrontmostApp();
+            return {
+              action: "inspect_windows",
+              target: frontmost,
+              output: `Frontmost application is ${frontmost}. No mouse/keyboard event dispatched (no destructive action requested).`,
+              success: true,
+              durationMs: 0,
+              driverType: "AppleScript_SystemEvents_Native"
+            };
+          }
+        };
+
         let result: any;
-        if (actionType === "activate_app") {
-          result = await driver.launchApp(target);
-        } else if (actionType === "keystroke") {
-          result = await driver.typeText(textPayload || "");
-        } else if (actionType === "click") {
-          const [cx, cy] = Array.isArray(body.coordinates) ? body.coordinates : [0, 0];
-          result = await driver.clickAt(cx, cy, target || undefined);
-        } else if (actionType === "double_click") {
-          const [cx, cy] = Array.isArray(body.coordinates) ? body.coordinates : [0, 0];
-          result = await driver.doubleClickAt(cx, cy, target || undefined);
-        } else if (actionType === "notify") {
-          result = await driver.showNotification("OmniOS Pilot", textPayload || "Action executed");
+        let verification: any = null;
+        if (wantVerify) {
+          const wrapped = await runWithVerification(dispatch);
+          result = wrapped.result;
+          verification = wrapped.verification;
         } else {
-          // inspect_windows / unknown: nothing destructive to dispatch, just report frontmost app.
-          const frontmost = await driver.getFrontmostApp();
-          result = {
-            action: "inspect_windows",
-            target: frontmost,
-            output: `Frontmost application is ${frontmost}. No mouse/keyboard event dispatched (no destructive action requested).`,
-            success: true,
-            durationMs: 0,
-            driverType: "AppleScript_SystemEvents_Native"
-          };
+          result = await dispatch();
         }
+
+        history.append({
+          actionType,
+          target,
+          textPayload,
+          coordinates: Array.isArray(body.coordinates) ? [body.coordinates[0], body.coordinates[1]] : undefined,
+          success: result.success,
+          output: result.output,
+          durationMs: result.durationMs,
+          safetyRiskLevel: check.riskLevel,
+          verification
+        });
 
         return new Response(JSON.stringify({
           command: result.action,
@@ -146,7 +224,8 @@ const server = Bun.serve({
           durationMs: result.durationMs,
           driverType: result.driverType,
           output: result.output,
-          success: result.success
+          success: result.success,
+          verification
         }), { status: result.success ? 200 : 500, headers });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
@@ -254,6 +333,105 @@ const server = Bun.serve({
     if (url.pathname === "/api/safety/reset" && req.method === "POST") {
       const res = safety.resetSafety();
       return new Response(JSON.stringify(res), { headers });
+    }
+
+    // 8. Real Action History / Audit Log (disk-persisted, see src/action_history.ts)
+    if (url.pathname === "/api/pilot/history" && req.method === "GET") {
+      const limit = Number(url.searchParams.get("limit")) || 50;
+      return new Response(JSON.stringify(history.getHistory(limit)), { headers });
+    }
+    if (url.pathname === "/api/pilot/history" && req.method === "DELETE") {
+      const res = await history.clear();
+      return new Response(JSON.stringify(res), { headers });
+    }
+
+    // 9. Real Multi-Step Planning: decomposes a goal into steps via a local
+    // Ollama text model (see VisionGroundingAgent.planMultiStep).
+    if (url.pathname === "/api/pilot/plan-multistep" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const goal = body.goal || "Apri TextEdit e scrivi una nota di prova";
+        const plan = await visionAgent.planMultiStep(goal);
+        return new Response(JSON.stringify(plan), { headers: { ...headers } });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
+
+    // 9b. Real Multi-Step Execution: runs each planned step sequentially
+    // through the same safety guard + observe-act-verify loop as a single
+    // /api/pilot/execute call, stopping immediately on the first unsafe or
+    // failed step rather than plowing ahead. Every step is appended to the
+    // real action history log with its plan goal/index for audit.
+    if (url.pathname === "/api/pilot/execute-plan" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const steps: any[] = Array.isArray(body.steps) ? body.steps : [];
+        const goal: string = body.goal || "";
+        const wantVerify: boolean = body.verify !== false; // verify by default for multi-step runs
+
+        const trace: any[] = [];
+        for (let i = 0; i < steps.length; i++) {
+          const step = steps[i];
+          const actionType: string = step.actionType || "inspect_windows";
+          const target: string = step.target || "Finder";
+          const textPayload: string | undefined = step.textPayload;
+
+          const check = safety.evaluateAction(actionType, [0, 0], textPayload);
+          if (!check.isSafe) {
+            trace.push({ stepIndex: i, actionType, target, blocked: true, safetyCheck: check });
+            break;
+          }
+
+          const dispatch = async (): Promise<any> => {
+            if (actionType === "activate_app") return await driver.launchApp(target);
+            if (actionType === "keystroke") return await driver.typeText(textPayload || "");
+            if (actionType === "notify") return await driver.showNotification("OmniOS Pilot Plan", textPayload || "Step executed");
+            const frontmost = await driver.getFrontmostApp();
+            return {
+              action: "inspect_windows",
+              target: frontmost,
+              output: `Frontmost application is ${frontmost}.`,
+              success: true,
+              durationMs: 0,
+              driverType: "AppleScript_SystemEvents_Native"
+            };
+          };
+
+          let result: any;
+          let verification: any = null;
+          if (wantVerify) {
+            const wrapped = await runWithVerification(dispatch);
+            result = wrapped.result;
+            verification = wrapped.verification;
+          } else {
+            result = await dispatch();
+          }
+
+          history.append({
+            actionType,
+            target,
+            textPayload,
+            success: result.success,
+            output: result.output,
+            durationMs: result.durationMs,
+            safetyRiskLevel: check.riskLevel,
+            verification,
+            planStepIndex: i,
+            planGoal: goal
+          });
+
+          trace.push({ stepIndex: i, actionType, target, textPayload, result, verification, blocked: false });
+
+          if (!result.success) break; // stop the plan on the first real failure
+        }
+
+        return new Response(JSON.stringify({ goal, totalSteps: steps.length, executedSteps: trace.length, trace }), { headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
     }
 
     // 5. 5-Competitor Matrix

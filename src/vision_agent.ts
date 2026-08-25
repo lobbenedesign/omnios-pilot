@@ -19,12 +19,28 @@ import { existsSync } from "fs";
 
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 const VISION_MODEL = process.env.OMNIOS_VISION_MODEL || "moondream";
+const PLANNING_MODEL = process.env.OMNIOS_PLANNING_MODEL || "llama3.2:3b";
 
 export interface RealRunningProcess {
   id: string;
   name: string;
   isFrontmost: boolean;
   type: "application" | "system";
+}
+
+export interface PlannedStep {
+  actionType: "activate_app" | "keystroke" | "notify" | "inspect_windows";
+  target: string;
+  textPayload?: string;
+  reason: string;
+}
+
+export interface MultiStepPlanResult {
+  goal: string;
+  planningModelUsed: string | null;
+  steps: PlannedStep[];
+  rawModelOutput?: string;
+  error?: string;
 }
 
 export interface OSActionPlan {
@@ -41,10 +57,17 @@ export interface OSActionPlan {
 
 export class VisionGroundingAgent {
   /**
-   * Captures a real screenshot of the active display to disk
+   * Captures a real screenshot of the active display to disk. Defaults to
+   * the fixed path the UI polls (`/api/pilot/screenshot-file`), but accepts
+   * an explicit `outPath` so callers that need two genuinely distinct files
+   * on disk at once - e.g. the before/after pair in the observe-act-verify
+   * loop in server.ts's `runWithVerification` - don't have the "after"
+   * capture silently overwrite the "before" capture at the same path before
+   * it can be diffed (that was a real bug caught during manual testing:
+   * both screenshots resolved to the same fixed file, so the pixel-diff
+   * step always compared a file against itself and reported 0% changed).
    */
-  public async captureScreen(): Promise<string | null> {
-    const outPath = "/tmp/omnios_live_capture.png";
+  public async captureScreen(outPath: string = "/tmp/omnios_live_capture.png"): Promise<string | null> {
     try {
       const proc = Bun.spawn(["/usr/sbin/screencapture", "-x", "-C", outPath]);
       await proc.exited;
@@ -189,5 +212,107 @@ export class VisionGroundingAgent {
       suggestedTarget: target,
       rationale
     };
+  }
+
+  /**
+   * Real multi-step task planning: sends the goal and the genuine live
+   * process list to a local Ollama text model (default llama3.2:3b, also
+   * verified reachable on this machine: granite3-dense:2b / qwen2.5:7b) and
+   * asks it to decompose the goal into a short ordered sequence of concrete
+   * actions from OmniOS-Pilot's real action vocabulary (activate_app,
+   * keystroke, notify, inspect_windows).
+   *
+   * HONESTY: this is a genuine LLM call, not a scripted template - the
+   * model's response is parsed as JSON and used as-is. If Ollama is
+   * unreachable, the model is not pulled, or the model's output cannot be
+   * parsed as a valid step list, this returns an explicit `error` field and
+   * an EMPTY steps array rather than silently falling back to a fabricated
+   * plan. Inspired by the "planning" phase real GUI agents like UI-TARS-2
+   * and self-operating-computer perform before the observe-act-verify loop.
+   */
+  public async planMultiStep(goal: string): Promise<MultiStepPlanResult> {
+    const { frontmost, processes } = await this.getRealRunningProcesses();
+    const processNames = processes.map((p) => p.name).join(", ");
+
+    const prompt = `You are a macOS desktop automation planner. Decompose the user's goal into a short ordered JSON array of concrete steps.
+Each step must be an object with exactly these fields:
+  "actionType": one of "activate_app", "keystroke", "notify", "inspect_windows"
+  "target": for activate_app, an app name (prefer one from the real running-processes list below if it fits, otherwise a real macOS app name like "TextEdit" or "Calculator"); for other action types, use the frontmost app name.
+  "textPayload": text to type, ONLY when actionType is "keystroke" (omit otherwise)
+  "reason": one short sentence explaining the step
+
+Rules:
+- Output ONLY a JSON array, no prose, no markdown fences.
+- Use at most 5 steps.
+- Never include destructive actions (no file deletion, no shell commands, no "sudo").
+- Real frontmost app right now: ${frontmost}
+- Real currently visible running apps: ${processNames}
+
+User goal: "${goal}"`;
+
+    try {
+      const res = await fetch(`${OLLAMA_URL}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: PLANNING_MODEL,
+          prompt,
+          stream: false,
+          options: { temperature: 0.2 }
+        }),
+        // Measured on this machine: a cold Ollama model load alone can take
+        // ~24s before the first token, plus prompt/eval time - a 45s budget
+        // (originally copied from the vision-caption timeout) genuinely
+        // timed out on a first real call during testing. 120s gives a cold
+        // load plus this multi-sentence planning prompt real headroom.
+        signal: AbortSignal.timeout(120000)
+      });
+
+      if (!res.ok) {
+        return { goal, planningModelUsed: null, steps: [], error: `Ollama HTTP ${res.status}` };
+      }
+      const data: any = await res.json();
+      const raw: string = (data.response || "").trim();
+
+      // The model may wrap the array in prose or markdown fences despite
+      // instructions - extract the first [...] block rather than assuming
+      // the entire response is clean JSON.
+      const match = raw.match(/\[[\s\S]*\]/);
+      if (!match) {
+        return { goal, planningModelUsed: PLANNING_MODEL, steps: [], rawModelOutput: raw, error: "Model output did not contain a parseable JSON array" };
+      }
+
+      let parsedSteps: any[];
+      try {
+        parsedSteps = JSON.parse(match[0]);
+      } catch (e: any) {
+        return { goal, planningModelUsed: PLANNING_MODEL, steps: [], rawModelOutput: raw, error: `JSON parse error: ${e.message}` };
+      }
+
+      const validActionTypes = new Set(["activate_app", "keystroke", "notify", "inspect_windows"]);
+      const steps: PlannedStep[] = [];
+      for (const s of parsedSteps.slice(0, 5)) {
+        if (!s || typeof s !== "object") continue;
+        if (!validActionTypes.has(s.actionType)) continue;
+        // Hard safety net independent of SafetyGuard: never let a planned
+        // step's text payload through if it smells destructive.
+        const textPayload = typeof s.textPayload === "string" ? s.textPayload : undefined;
+        if (textPayload && /rm\s+-rf|sudo|delete/i.test(textPayload)) continue;
+        steps.push({
+          actionType: s.actionType,
+          target: typeof s.target === "string" && s.target.trim() ? s.target.trim() : frontmost,
+          textPayload,
+          reason: typeof s.reason === "string" ? s.reason : ""
+        });
+      }
+
+      if (steps.length === 0) {
+        return { goal, planningModelUsed: PLANNING_MODEL, steps: [], rawModelOutput: raw, error: "Model produced no valid steps after safety/schema filtering" };
+      }
+
+      return { goal, planningModelUsed: PLANNING_MODEL, steps, rawModelOutput: raw };
+    } catch (e: any) {
+      return { goal, planningModelUsed: null, steps: [], error: e.message || "Ollama unreachable" };
+    }
   }
 }

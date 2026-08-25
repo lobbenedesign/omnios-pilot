@@ -29,11 +29,31 @@ An earlier version of this README claimed "97.4% pixel-coordinate visual groundi
 4. **Human-in-the-loop safety guard** (`src/safety_guard.ts`): blocks any action whose text payload contains `rm -rf`, `sudo`, or `delete`, and a "Panic Switch" that freezes all `/api/pilot/execute` calls until reset — both enforced server-side, verified with `curl` (dangerous payloads get a real `403`).
 5. **Goal → action heuristic**: a simple keyword match (`apri`/`open`/`launch`, `scrivi`/`type`) picks an `actionType` and target app from the running-process list. This is plain string matching, not an ML planner, and the UI labels it as such.
 
-### ❌ What this project does NOT do (be aware before relying on it)
+### 🖱️ NEW: Real pixel-coordinate click dispatch
 
-- **No pixel-coordinate visual grounding.** There is no model that outputs `(x, y)` click coordinates or bounding boxes. Real mouse click-at-coordinates is not implemented (no `cliclick` or CoreGraphics event tap integration exists in this codebase).
+Closing part of the gap noted above (and matching a capability Anthropic's Claude Computer Use, OpenAI's Computer Use/Operator, and bytedance/UI-TARS all advertise: dispatching a real mouse event at an arbitrary screen coordinate):
+
+- `MouseKeyboardDriver.clickAt(x, y, processName?)` (`src/mouse_keyboard_driver.ts`) dispatches a **real** macOS mouse click at absolute screen pixel coordinates via `osascript -e 'tell application "System Events" to tell process "<name>" to click at {x, y}'`. Verified directly on this machine:
+  ```
+  $ osascript -e 'tell application "System Events" to tell process "Finder" to click at {300, 300}'
+  (exit 0)
+  ```
+  Note the click must be sent to a named *process* object — sending `click at {x,y}` straight to the `System Events` application object fails with AppleScript error `-609` ("invalid connection"); the System Events dictionary (`sdef`) documents the `at` parameter as belonging to the `process` class, not the `application` class.
+- `doubleClickAt(x, y, processName?)` sends two real clicks 120ms apart.
+- `pressKeyCode(keyCode, modifiers?)` sends a real macOS virtual-key-code keyboard shortcut (e.g. Cmd+C) via `System Events key code ... using {command down}`, distinct from the plain-text `keystroke` already used by `typeText`.
+- New endpoints, all real and curl-verified: `POST /api/pilot/click {x,y,process,double}`, `POST /api/pilot/keycode {keyCode,modifiers}`, and `actionType: "click" | "double_click"` on the existing `POST /api/pilot/execute`.
+- **Closed observe → click → re-observe loop in the UI**: clicking directly on the rendered screenshot in the dashboard (`public/app.js`, `setupCanvasClickToRealClick`) maps the click's canvas position back to real absolute screen coordinates (using the actual scale/offset the screenshot was drawn at) and dispatches a genuine `POST /api/pilot/click` — then you can re-run "Analyze & Plan" to capture a fresh screenshot and see the result. This is a manual click-through-image loop, not an autonomous agent deciding where to click on its own — see the honesty note below.
+
+An invalid target still fails honestly rather than faking success — tested with a nonexistent process name:
+```json
+{"action":"clickAt(100, 100)","target":"ThisAppDoesNotExist123","output":"","success":false,"durationMs":6564.25,"driverType":"AppleScript_SystemEvents_Native"}
+```
+
+### ❌ What this project still does NOT do (be aware before relying on it)
+
+- **No model-driven visual grounding.** Nothing in this codebase looks at the screenshot and *decides* which `(x, y)` to click — the coordinate has to be supplied by the caller (a human clicking the screenshot in the UI, or an API caller). The Ollama vision call only produces a text description, never coordinates or bounding boxes. If you want an LLM to choose where to click, you still have to build that planning layer on top of `/api/pilot/click`.
 - **No independent benchmark** against UI-TARS, Claude Computer Use, ShowUI, or OSWorld. `src/competitor_benchmark.ts` is now a plain, unscored feature comparison based on each project's public documentation — it does not run any of those systems.
-- **Not a full autonomous agent loop.** Planning and execution are separate manual steps triggered by UI buttons; there's no closed-loop "observe → click → re-observe" agent yet.
+- **Not a full autonomous agent loop.** Planning (`/api/pilot/plan`) and execution are still separate steps triggered by UI buttons or API calls; nothing in this codebase loops on its own deciding "click here, observe, click again" without a human or external caller driving each step.
 
 ### 🛠️ Quick Start
 
@@ -62,6 +82,8 @@ Open your browser at **`http://localhost:3007`**. macOS will prompt for Accessib
 | `/api/pilot/plan` | POST `{goal}` | Real process list + real screenshot + optional real Ollama vision description + keyword-based action heuristic + safety check. |
 | `/api/pilot/execute` | POST `{actionType, target, textPayload}` | Runs the safety check, then actually dispatches the AppleScript action (launch app / type text / show notification). Blocked actions return real `403`s. |
 | `/api/pilot/launch`, `/api/pilot/type`, `/api/pilot/notify` | POST | Direct real driver calls, bypassing planning. |
+| `/api/pilot/click` | POST `{x, y, process?, double?}` | Real pixel-coordinate mouse click via System Events, curl-verified. |
+| `/api/pilot/keycode` | POST `{keyCode, modifiers?}` | Real keyboard shortcut (e.g. Cmd+C) via System Events `key code ... using {...}`. |
 | `/api/safety/panic`, `/api/safety/reset` | POST | Real server-side state toggle enforced on every `/api/pilot/execute` call. |
 | `/api/competitors` | GET | Honest qualitative feature comparison, no invented scores. |
 
@@ -84,9 +106,9 @@ Una versione precedente di questo README dichiarava "97.4% di precisione di punt
 
 ### ❌ Cosa questo progetto NON fa (da sapere prima di farci affidamento)
 
-- **Nessun puntamento visivo a coordinate pixel.** Non esiste alcun modello che produca coordinate `(x, y)` di click o bounding box. Il click reale a coordinate non è implementato (nessuna integrazione con `cliclick` o CoreGraphics event tap in questo codebase).
+- **Nessun puntamento visivo guidato da modello.** Nessun componente del codice guarda lo screenshot e *decide* autonomamente quali coordinate `(x, y)` cliccare — la coordinata deve essere fornita dal chiamante (un umano che clicca sullo screenshot nella UI, o un chiamante API). Il click reale a coordinate **ora esiste** (`POST /api/pilot/click`, vedi sezione 🇬🇧 sopra per i dettagli e la verifica reale), ma è un primitivo di esecuzione, non un pianificatore visivo.
 - **Nessun benchmark indipendente** contro UI-TARS, Claude Computer Use, ShowUI o OSWorld. `src/competitor_benchmark.ts` è ora un semplice confronto qualitativo di funzionalità basato sulla documentazione pubblica di ciascun progetto — non esegue nessuno di quei sistemi.
-- **Non è un agente autonomo completo.** Pianificazione ed esecuzione sono passi manuali separati attivati da pulsanti nella UI; non esiste ancora un ciclo chiuso "osserva → clicca → ri-osserva".
+- **Non è un agente autonomo completo.** Pianificazione (`/api/pilot/plan`) ed esecuzione restano passi separati attivati da pulsanti nella UI o chiamate API; nessun componente del codice ripete da solo "clicca, osserva, clicca di nuovo" senza un umano o un chiamante esterno che guidi ogni passo. Cliccare direttamente sullo screenshot renderizzato nella dashboard ora dispatcha un click reale mappato alle coordinate assolute dello schermo — è un ciclo manuale click-attraverso-immagine, non un agente autonomo.
 
 ### 🛠️ Avvio Rapido
 

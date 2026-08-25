@@ -108,7 +108,8 @@ const server = Bun.serve({
         const target: string = body.target || "Finder";
         const textPayload: string | undefined = body.textPayload;
 
-        const check = safety.evaluateAction(actionType, [0, 0], textPayload);
+        const coordsForCheck: [number, number] = Array.isArray(body.coordinates) ? [body.coordinates[0], body.coordinates[1]] : [0, 0];
+        const check = safety.evaluateAction(actionType, coordsForCheck, textPayload);
         if (!check.isSafe) {
           return new Response(JSON.stringify({ error: check.reason, safetyCheck: check }), { status: 403, headers });
         }
@@ -118,6 +119,12 @@ const server = Bun.serve({
           result = await driver.launchApp(target);
         } else if (actionType === "keystroke") {
           result = await driver.typeText(textPayload || "");
+        } else if (actionType === "click") {
+          const [cx, cy] = Array.isArray(body.coordinates) ? body.coordinates : [0, 0];
+          result = await driver.clickAt(cx, cy, target || undefined);
+        } else if (actionType === "double_click") {
+          const [cx, cy] = Array.isArray(body.coordinates) ? body.coordinates : [0, 0];
+          result = await driver.doubleClickAt(cx, cy, target || undefined);
         } else if (actionType === "notify") {
           result = await driver.showNotification("OmniOS Pilot", textPayload || "Action executed");
         } else {
@@ -186,6 +193,40 @@ const server = Bun.serve({
         const text = body.text || "Hello from OmniOS Pilot";
         const res = await driver.typeText(text);
         return new Response(JSON.stringify(res), { headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
+
+    // 6b. Real Pixel-Coordinate Click (verified: System Events "click at {x,y}"
+    // sent to a named process, exit code 0 on this machine).
+    if (url.pathname === "/api/pilot/click" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const x = Number(body.x) || 0;
+        const y = Number(body.y) || 0;
+        const process = body.process as string | undefined;
+        const double = Boolean(body.double);
+        const res = double ? await driver.doubleClickAt(x, y, process) : await driver.clickAt(x, y, process);
+        return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
+
+    // 6c. Real Keyboard Shortcut (key code + modifiers, e.g. Cmd+C = keyCode 8, ["command down"]).
+    if (url.pathname === "/api/pilot/keycode" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const keyCode = Number(body.keyCode);
+        const modifiers: string[] = Array.isArray(body.modifiers) ? body.modifiers : [];
+        if (!Number.isFinite(keyCode)) {
+          return new Response(JSON.stringify({ error: "keyCode (number) is required" }), { status: 400, headers });
+        }
+        const res = await driver.pressKeyCode(keyCode, modifiers);
+        return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
       }

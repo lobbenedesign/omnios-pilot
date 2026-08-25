@@ -15,11 +15,17 @@
  */
 
 let currentPlan = null;
+// Tracks how the last real screenshot was fitted into the canvas, so a click
+// on the canvas can be mapped back to REAL absolute screen coordinates and
+// dispatched as a genuine click via /api/pilot/click. This is what closes the
+// "observe -> click -> re-observe" loop the README previously said was missing.
+let lastScreenshotMapping = null; // { scale, dx, dy, realWidth, realHeight }
 
 document.addEventListener("DOMContentLoaded", () => {
   setupTabs();
   setupPilotActions();
   setupPanicControls();
+  setupCanvasClickToRealClick();
   fetchCompetitorMatrix();
 });
 
@@ -69,11 +75,64 @@ async function drawDesktopScreen(screenshotPath) {
     ctx.fillStyle = "#0f172a";
     ctx.fillRect(0, 0, w, h);
     ctx.drawImage(img, dx, dy, dw, dh);
+
+    // Real screenshot pixel dimensions == real screen resolution captured by
+    // `screencapture` (macOS captures at native resolution), so this scale
+    // factor maps canvas clicks back to genuine absolute screen coordinates.
+    lastScreenshotMapping = { scale, dx, dy, realWidth: img.width, realHeight: img.height };
   };
   img.onerror = () => {
     ctx.fillText("Screenshot captured on disk but could not be loaded in-browser.", 14, h / 2);
   };
   img.src = `/api/pilot/screenshot-file?ts=${Date.now()}`;
+}
+
+// 1b. Click-to-real-click: clicking on the rendered screenshot dispatches a
+// REAL macOS mouse click at the corresponding absolute screen coordinate via
+// POST /api/pilot/click (System Events "click at {x,y}"). Requires the
+// frontmost app to be named explicitly since the browser tab itself is
+// frontmost while the click originates - defaults to whatever process the
+// last /api/pilot/plan call detected as frontmost.
+function setupCanvasClickToRealClick() {
+  const canvas = document.getElementById("screen-viewport-canvas");
+  const terminal = document.getElementById("driver-execution-output");
+  if (!canvas) return;
+
+  canvas.addEventListener("click", async (ev) => {
+    if (!lastScreenshotMapping) {
+      if (terminal) terminal.textContent = "// No screenshot loaded yet - click 'Analyze & Plan' first.";
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const canvasX = (ev.clientX - rect.left) * (canvas.width / rect.width);
+    const canvasY = (ev.clientY - rect.top) * (canvas.height / rect.height);
+    const { scale, dx, dy, realWidth, realHeight } = lastScreenshotMapping;
+    const realX = (canvasX - dx) / scale;
+    const realY = (canvasY - dy) / scale;
+    if (realX < 0 || realY < 0 || realX > realWidth || realY > realHeight) {
+      if (terminal) terminal.textContent = "// Click was outside the rendered screenshot area - ignored.";
+      return;
+    }
+
+    const targetProcess = currentPlan?.detectedFrontmostApp;
+    if (terminal) terminal.textContent = `// Dispatching REAL click at screen (${Math.round(realX)}, ${Math.round(realY)}) via /api/pilot/click...`;
+
+    try {
+      const res = await fetch("/api/pilot/click", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ x: realX, y: realY, process: targetProcess })
+      });
+      const data = await res.json();
+      if (terminal) {
+        terminal.textContent = res.ok && data.success
+          ? `=== 🖱️ REAL PIXEL CLICK (System Events "click at") ===\n• Screen coords: (${Math.round(realX)}, ${Math.round(realY)})\n• Target process: ${data.target}\n• Latency: ${data.durationMs} ms\n✓ Real click event dispatched to macOS.`
+          : `🚨 CLICK FAILED: ${data.output || data.error || "unknown error"}`;
+      }
+    } catch (e) {
+      if (terminal) terminal.textContent = "Error: " + e.message;
+    }
+  });
 }
 
 // 2. Pilot Actions (Plan & Execute)

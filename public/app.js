@@ -1,7 +1,17 @@
 /**
  * 🖥️ OMNIOS-PILOT CLIENT SCRIPT
- * Handles Canvas Desktop Viewport Rendering with Bounding Boxes,
- * Multimodal Visual Grounding Action Planning, Native Execution, and Panic Switch.
+ *
+ * HONESTY NOTE: the previous version of this file rendered a canvas with
+ * fake bounding boxes and a "target crosshair" driven by fields
+ * (plan.elements, plan.targetCoordinates, plan.detectedApp, data.safetyCheck)
+ * that the backend never returned - the plan() function crashed with a
+ * TypeError on every page load (data.safetyCheck was undefined) and the
+ * Execute button called POST /api/pilot/execute, an endpoint that did not
+ * exist on the server (guaranteed 404). Nothing on this page ever actually
+ * worked. It has been rewritten to only display data the backend genuinely
+ * produces: the real captured screenshot, the real frontmost app / process
+ * list, the real (or honestly-absent) local vision-model description, and
+ * a real execute call wired to the now-implemented /api/pilot/execute route.
  */
 
 let currentPlan = null;
@@ -11,7 +21,6 @@ document.addEventListener("DOMContentLoaded", () => {
   setupPilotActions();
   setupPanicControls();
   fetchCompetitorMatrix();
-  drawDesktopScreen(null);
 });
 
 function setupTabs() {
@@ -29,85 +38,42 @@ function setupTabs() {
   });
 }
 
-// 1. Desktop Canvas Screen Renderer with BBoxes & Crosshair
-function drawDesktopScreen(plan) {
+// 1. Render the REAL captured screenshot into the canvas (no fake bounding boxes).
+async function drawDesktopScreen(screenshotPath) {
   const canvas = document.getElementById("screen-viewport-canvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
 
-  // Background desktop wallpaper
-  const gradient = ctx.createLinearGradient(0, 0, w, h);
-  gradient.addColorStop(0, "#0f172a");
-  gradient.addColorStop(1, "#0284c7");
-  ctx.fillStyle = gradient;
+  ctx.fillStyle = "#0f172a";
   ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "12px 'Inter'";
 
-  // Top macOS menu bar
-  ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
-  ctx.fillRect(0, 0, w, 22);
-  ctx.fillStyle = "#fff";
-  ctx.font = "10px 'Inter'";
-  ctx.fillText("  Finder  File  Edit  View  Go  Window  Help", 14, 15);
-
-  // Simulated Open Window (Finder / Invoice)
-  ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
-  ctx.strokeStyle = "#38bdf8";
-  ctx.lineWidth = 1;
-  ctx.fillRect(70, 45, 460, 240);
-  ctx.strokeRect(70, 45, 460, 240);
-
-  // Window titlebar
-  ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
-  ctx.fillRect(70, 45, 460, 24);
-  ctx.fillStyle = "#e2e8f0";
-  ctx.font = "11px 'Inter'";
-  ctx.fillText("Documents — Invoice Export (macOS Native)", 190, 61);
-
-  // Draw Bounding Boxes if plan exists
-  if (plan && plan.elements) {
-    plan.elements.forEach(elem => {
-      const [bx, by, bw, bh] = elem.bbox;
-      // Scale coordinates to canvas width/height
-      const scaleX = w / 1920;
-      const scaleY = h / 1080;
-      const sx = bx * scaleX;
-      const sy = by * scaleY;
-      const sw = bw * scaleX;
-      const sh = bh * scaleY;
-
-      ctx.strokeStyle = "#38bdf8";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(sx, sy, sw, sh);
-
-      ctx.fillStyle = "rgba(56, 189, 248, 0.2)";
-      ctx.fillRect(sx, sy, sw, sh);
-
-      // Label
-      ctx.fillStyle = "#38bdf8";
-      ctx.font = "8px 'Fira Code'";
-      ctx.fillText(`${elem.name} (${(elem.confidence * 100).toFixed(0)}%)`, sx, sy - 4);
-    });
-
-    // Draw Simulated Target Crosshair
-    const [tx, ty] = plan.targetCoordinates;
-    const targetCanvasX = (tx / 1920) * w;
-    const targetCanvasY = (ty / 1080) * h;
-
-    ctx.strokeStyle = "#fbbf24";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(targetCanvasX, targetCanvasY, 10, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(targetCanvasX - 14, targetCanvasY);
-    ctx.lineTo(targetCanvasX + 14, targetCanvasY);
-    ctx.moveTo(targetCanvasX, targetCanvasY - 14);
-    ctx.lineTo(targetCanvasX, targetCanvasY + 14);
-    ctx.stroke();
+  if (!screenshotPath) {
+    ctx.fillText("No screenshot available (screencapture failed or was denied).", 14, h / 2);
+    return;
   }
+
+  // Cache-bust so we always see the latest real capture, served from disk.
+  const img = new Image();
+  img.onload = () => {
+    ctx.clearRect(0, 0, w, h);
+    // Fit the real screenshot into the canvas preserving aspect ratio.
+    const scale = Math.min(w / img.width, h / img.height);
+    const dw = img.width * scale;
+    const dh = img.height * scale;
+    const dx = (w - dw) / 2;
+    const dy = (h - dh) / 2;
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, dx, dy, dw, dh);
+  };
+  img.onerror = () => {
+    ctx.fillText("Screenshot captured on disk but could not be loaded in-browser.", 14, h / 2);
+  };
+  img.src = `/api/pilot/screenshot-file?ts=${Date.now()}`;
 }
 
 // 2. Pilot Actions (Plan & Execute)
@@ -119,7 +85,7 @@ function setupPilotActions() {
   const terminal = document.getElementById("driver-execution-output");
 
   async function plan() {
-    btnPlan.textContent = "👁️ Grounding...";
+    btnPlan.textContent = "👁️ Analyzing (real screencapture + process list)...";
     try {
       const res = await fetch("/api/pilot/plan", {
         method: "POST",
@@ -127,20 +93,34 @@ function setupPilotActions() {
         body: JSON.stringify({ goal: inputGoal.value })
       });
       const data = await res.json();
+      if (!res.ok || !data.plan) {
+        planBox.innerHTML = `<span style="color:#f43f5e;">Error: ${data.error || "unknown"}</span>`;
+        btnPlan.textContent = "👁️ Analyze & Plan";
+        return;
+      }
       currentPlan = data.plan;
 
-      document.getElementById("badge-target-coords").textContent = `(${currentPlan.targetCoordinates[0]}, ${currentPlan.targetCoordinates[1]}) ${currentPlan.actionType.toUpperCase()}`;
+      const badge = document.getElementById("badge-target-coords");
+      badge.textContent = `${currentPlan.actionType.toUpperCase()} → ${currentPlan.suggestedTarget}`;
+
+      const accBadge = document.getElementById("badge-grounding-acc");
+      if (accBadge) accBadge.textContent = currentPlan.visionModelUsed ? `Vision: ${currentPlan.visionModelUsed}` : "Vision: unavailable (heuristic only)";
+
+      const processNames = (currentPlan.realRunningProcesses || []).map(p => p.name).join(", ");
 
       planBox.innerHTML = `
-        <strong style="color: #fff;">Detected App:</strong> ${currentPlan.detectedApp}<br>
-        <strong style="color: #fff;">Action Type:</strong> <span style="color: #38bdf8;">${currentPlan.actionType.toUpperCase()}</span> at [X: ${currentPlan.targetCoordinates[0]}, Y: ${currentPlan.targetCoordinates[1]}]<br>
-        <strong style="color: #fff;">Vision Rationale:</strong> ${currentPlan.rationale}<br>
-        <strong style="color: #fff;">Safety Status:</strong> <span style="color: #34d399;">${data.safetyCheck.reason}</span>
+        <strong style="color: #fff;">Real Frontmost App:</strong> ${currentPlan.detectedFrontmostApp}<br>
+        <strong style="color: #fff;">Real Visible Processes:</strong> ${processNames || "(none detected)"}<br>
+        <strong style="color: #fff;">Action Type:</strong> <span style="color: #38bdf8;">${currentPlan.actionType.toUpperCase()}</span> → target: ${currentPlan.suggestedTarget}<br>
+        <strong style="color: #fff;">Heuristic Rationale:</strong> ${currentPlan.rationale}<br>
+        ${currentPlan.visionDescription ? `<strong style="color: #fff;">Local Vision Model (${currentPlan.visionModelUsed || "n/a"}) Description:</strong> ${currentPlan.visionDescription}<br>` : ""}
+        <strong style="color: #fff;">Safety Status:</strong> <span style="color: ${data.safetyCheck && data.safetyCheck.isSafe ? '#34d399' : '#f43f5e'};">${data.safetyCheck ? data.safetyCheck.reason : "n/a"}</span>
       `;
 
-      drawDesktopScreen(currentPlan);
+      drawDesktopScreen(currentPlan.screenshotPath);
       btnPlan.textContent = "👁️ Analyze & Plan";
     } catch (e) {
+      planBox.innerHTML = `<span style="color:#f43f5e;">Request failed: ${e.message}</span>`;
       btnPlan.textContent = "👁️ Analyze & Plan";
     }
   }
@@ -148,7 +128,7 @@ function setupPilotActions() {
   async function execute() {
     if (!currentPlan) return;
     btnExecute.textContent = "🖱️ Executing...";
-    terminal.textContent = `// Dispatching native OS driver command...`;
+    terminal.textContent = `// Dispatching real native OS driver command via /api/pilot/execute...`;
 
     try {
       const res = await fetch("/api/pilot/execute", {
@@ -156,21 +136,21 @@ function setupPilotActions() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           actionType: currentPlan.actionType,
-          coordinates: currentPlan.targetCoordinates,
-          textPayload: currentPlan.textPayload
+          target: currentPlan.suggestedTarget,
+          textPayload: inputGoal.value
         })
       });
       const data = await res.json();
 
-      if (res.ok) {
-        terminal.textContent = `=== 🖱️ NATIVE DRIVER EXECUTION SUCCESS ===\n` +
+      if (res.ok && data.success) {
+        terminal.textContent = `=== 🖱️ NATIVE DRIVER EXECUTION (REAL osascript call) ===\n` +
           `• Command: ${data.command}\n` +
-          `• Screen Target: [X: ${data.coordinates[0]}, Y: ${data.coordinates[1]}]\n` +
+          `• Output: ${data.output}\n` +
           `• Latency: ${data.durationMs} ms\n` +
           `• Driver Subsystem: ${data.driverType}\n` +
-          `✓ Native UI event dispatched to active macOS window.`;
+          `✓ Real AppleScript event dispatched to macOS.`;
       } else {
-        terminal.textContent = `🚨 EXECUTION BLOCKED: ${data.error}`;
+        terminal.textContent = `🚨 EXECUTION BLOCKED OR FAILED: ${data.error || data.output || "unknown error"}`;
       }
       btnExecute.textContent = "🖱️ Execute Action";
     } catch (e) {
@@ -194,7 +174,6 @@ function setupPanicControls() {
       await fetch("/api/safety/panic", { method: "POST" });
       document.getElementById("chip-safety-status").textContent = "🚨 EMERGENCY FROZEN";
       document.getElementById("chip-safety-status").style.color = "#f43f5e";
-      alert("🚨 EMERGENCY PANIC SWITCH ENGAGED! All mouse and keyboard drivers frozen.");
     } catch {}
   });
 
@@ -203,12 +182,11 @@ function setupPanicControls() {
       await fetch("/api/safety/reset", { method: "POST" });
       document.getElementById("chip-safety-status").textContent = "🛡️ Safety: Active";
       document.getElementById("chip-safety-status").style.color = "#fbbf24";
-      alert("✓ Safety reset. Normal autonomous OS operations resumed.");
     } catch {}
   });
 }
 
-// 4. Competitor Matrix
+// 4. Feature comparison table (no fabricated numeric scores - see src/competitor_benchmark.ts)
 async function fetchCompetitorMatrix() {
   const container = document.getElementById("competitor-table-container");
   if (!container) return;
@@ -221,13 +199,13 @@ async function fetchCompetitorMatrix() {
       <table class="bench-table">
         <thead>
           <tr>
-            <th>Agent / Competitor</th>
+            <th>Project</th>
             <th>Architecture</th>
-            <th>Grounding Accuracy</th>
+            <th>Pixel-Coordinate Grounding</th>
             <th>Safety Guard Rails</th>
             <th>Visual BBox Overlay</th>
             <th>Local Offline Privacy</th>
-            <th>Cost / Action</th>
+            <th>Notes</th>
           </tr>
         </thead>
         <tbody>
@@ -239,11 +217,11 @@ async function fetchCompetitorMatrix() {
         <tr class="${isOur ? 'bench-row-highlight' : ''}">
           <td>${c.name}</td>
           <td>${c.architecture}</td>
-          <td style="color: #38bdf8; font-weight: 700;">${c.coordinateGroundingAccuracy}</td>
+          <td>${c.pixelCoordinateGrounding}</td>
           <td>${c.humanInTheLoopSafety ? '✓ Yes' : '✗ No'}</td>
           <td>${c.visualBBoxOverlay ? '✓ Yes' : '✗ No'}</td>
-          <td>${c.localOfflinePrivacy ? '✓ 100% Local' : '☁️ Cloud Docker'}</td>
-          <td>${c.costPerAction}</td>
+          <td>${c.localOfflinePrivacy ? '✓ Local' : '☁️ Cloud'}</td>
+          <td style="font-size:11px; color: var(--text-muted);">${c.notes}</td>
         </tr>
       `;
     });

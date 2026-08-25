@@ -1,79 +1,74 @@
 /**
- * 📊 5-Competitor Benchmark Matrix for OS Desktop Vision Automation
- * Compares OmniOS-Pilot against:
- * 1. ByteDance UI-TARS
- * 2. Anthropic Claude Computer Use
- * 3. ShowUI (ShowLab)
- * 4. OS-World / OS-Copilot
- * 5. Cradle (OpenAI / Tsinghua)
+ * 📊 Qualitative Feature Comparison vs other OS/desktop automation projects.
+ *
+ * HONESTY NOTE: an earlier version of this file hardcoded a fake
+ * "coordinateGroundingAccuracy" percentage for every project (97.4% for
+ * OmniOS-Pilot, 96.1% for UI-TARS, 91.8% for Claude Computer Use, etc.) and a
+ * "sub-10ms" latency claim. None of those numbers were ever measured -
+ * OmniOS-Pilot has never been benchmarked against any of these projects on
+ * any dataset (e.g. OSWorld, ScreenSpot), and no pixel-coordinate grounding
+ * model is even part of this codebase (see src/vision_agent.ts). Those
+ * figures have been removed. This is now a plain, unscored feature
+ * comparison based on public documentation of each project, marked as such.
  */
 
 export interface OSCopilotCompetitor {
   name: string;
-  architecture: "Native macOS/Win Agent" | "VLM GUI Framework" | "Cloud Docker Container";
-  coordinateGroundingAccuracy: string;
+  architecture: "Native macOS Agent (this project)" | "VLM GUI Framework" | "Cloud Docker Container" | "Academic Benchmark";
+  pixelCoordinateGrounding: "Not implemented" | "Yes (published)" | "Unknown";
   humanInTheLoopSafety: boolean;
   visualBBoxOverlay: boolean;
   localOfflinePrivacy: boolean;
-  costPerAction: string;
+  notes: string;
 }
 
 export class OSCompetitorBenchmark {
   public getComparison(): OSCopilotCompetitor[] {
     return [
       {
-        name: "🖥️ OmniOS-Pilot (Our Software)",
-        architecture: "Native macOS/Win Agent",
-        coordinateGroundingAccuracy: "97.4%",
+        name: "🖥️ OmniOS-Pilot (this project)",
+        architecture: "Native macOS Agent (this project)",
+        pixelCoordinateGrounding: "Not implemented",
         humanInTheLoopSafety: true,
-        visualBBoxOverlay: true,
+        visualBBoxOverlay: false,
         localOfflinePrivacy: true,
-        costPerAction: "$0.00 (Local Driver)"
+        notes: "Real AppleScript/System Events driver, real screen capture, real process enumeration, optional local Ollama (moondream) scene description. No pixel-click grounding model; goal→action mapping is keyword heuristics."
       },
       {
         name: "ByteDance UI-TARS",
         architecture: "VLM GUI Framework",
-        coordinateGroundingAccuracy: "96.1%",
+        pixelCoordinateGrounding: "Yes (published)",
         humanInTheLoopSafety: false,
         visualBBoxOverlay: false,
         localOfflinePrivacy: true,
-        costPerAction: "$0.00 (Python)"
+        notes: "Published research project with its own reported ScreenSpot/OSWorld numbers; not reproduced or verified here."
       },
       {
         name: "Anthropic Claude Computer Use",
         architecture: "Cloud Docker Container",
-        coordinateGroundingAccuracy: "91.8%",
+        pixelCoordinateGrounding: "Yes (published)",
         humanInTheLoopSafety: true,
         visualBBoxOverlay: false,
         localOfflinePrivacy: false,
-        costPerAction: "$0.03 / action"
+        notes: "Runs in a sandboxed container via the Anthropic API; billed per API usage."
       },
       {
         name: "ShowUI (ShowLab)",
         architecture: "VLM GUI Framework",
-        coordinateGroundingAccuracy: "93.5%",
+        pixelCoordinateGrounding: "Yes (published)",
         humanInTheLoopSafety: false,
         visualBBoxOverlay: true,
         localOfflinePrivacy: true,
-        costPerAction: "$0.00"
+        notes: "Open research project; see its own repository for reported numbers."
       },
       {
         name: "OS-World / OS-Copilot",
-        architecture: "VLM GUI Framework",
-        coordinateGroundingAccuracy: "88.9%",
+        architecture: "Academic Benchmark",
+        pixelCoordinateGrounding: "Unknown",
         humanInTheLoopSafety: false,
         visualBBoxOverlay: false,
         localOfflinePrivacy: true,
-        costPerAction: "$0.00"
-      },
-      {
-        name: "Cradle (Tsinghua / OpenAI)",
-        architecture: "VLM GUI Framework",
-        coordinateGroundingAccuracy: "86.4%",
-        humanInTheLoopSafety: false,
-        visualBBoxOverlay: false,
-        localOfflinePrivacy: true,
-        costPerAction: "$0.00"
+        notes: "OSWorld is primarily an evaluation benchmark, not itself a shipping agent."
       }
     ];
   }

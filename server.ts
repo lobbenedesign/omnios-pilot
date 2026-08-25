@@ -20,8 +20,8 @@ const benchmark = new OSCompetitorBenchmark();
 
 console.log(`\n======================================================`);
 console.log(`🖥️ OMNIOS-PILOT running on http://localhost:${PORT}`);
-console.log(`👁️ Multimodal UI Grounding (UI-TARS / ShowUI): Active`);
-console.log(`🖱️ Native Mouse/Keyboard CoreGraphics Driver: Ready`);
+console.log(`👁️ Vision description: local Ollama (moondream) if reachable, else heuristic-only fallback`);
+console.log(`🖱️ Native Mouse/Keyboard Driver: AppleScript / System Events (osascript)`);
 console.log(`🛡️ Human-in-the-Loop Safety & Panic Switch: Online`);
 console.log(`======================================================\n`);
 
@@ -57,14 +57,28 @@ const server = Bun.serve({
       if (existsSync(p)) return new Response(Bun.file(p));
     }
 
-    // 1. Status
+    // 1. Status - reports genuinely detected state, not fixed marketing strings.
     if (url.pathname === "/api/status" && req.method === "GET") {
+      let ollamaReachable = false;
+      try {
+        const r = await fetch(`${process.env.OLLAMA_URL || "http://localhost:11434"}/api/tags`, { signal: AbortSignal.timeout(1500) });
+        ollamaReachable = r.ok;
+      } catch {}
+
+      let screenResolution = "unknown";
+      try {
+        const proc = Bun.spawn(["osascript", "-e", 'tell application "Finder" to get bounds of window of desktop'], { stdout: "pipe" });
+        const out = (await new Response(proc.stdout).text()).trim();
+        const parts = out.split(", ").map(Number);
+        if (parts.length === 4) screenResolution = `${parts[2]}x${parts[3]}`;
+      } catch {}
+
       return new Response(JSON.stringify({
         status: "online",
         version: "1.0.0-omnios",
-        groundingModel: "Multimodal Vision VLM",
+        groundingModel: ollamaReachable ? "Local Ollama (moondream) reachable" : "No vision model reachable - heuristic fallback only",
         safetyStatus: "nominal",
-        activeScreenResolution: "1920x1080 (Retina 2x)"
+        activeScreenResolution: screenResolution
       }), { headers });
     }
 
@@ -75,7 +89,58 @@ const server = Bun.serve({
         try { body = await req.json(); } catch {}
         const goal = body.goal || "Apri il Finder e cerca un file";
         const plan = await visionAgent.parseScreenAndPlan(goal);
-        return new Response(JSON.stringify({ plan }), { headers });
+        const safetyCheck = safety.evaluateAction(plan.actionType, [0, 0], goal);
+        return new Response(JSON.stringify({ plan, safetyCheck }), { headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
+
+    // 2b. Execute a previously planned action for real.
+    // This endpoint was MISSING entirely in the original codebase: the frontend
+    // (public/app.js) called POST /api/pilot/execute on every "Execute Action"
+    // click and always received a 404, so the button never did anything real.
+    if (url.pathname === "/api/pilot/execute" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const actionType: string = body.actionType || "inspect_windows";
+        const target: string = body.target || "Finder";
+        const textPayload: string | undefined = body.textPayload;
+
+        const check = safety.evaluateAction(actionType, [0, 0], textPayload);
+        if (!check.isSafe) {
+          return new Response(JSON.stringify({ error: check.reason, safetyCheck: check }), { status: 403, headers });
+        }
+
+        let result: any;
+        if (actionType === "activate_app") {
+          result = await driver.launchApp(target);
+        } else if (actionType === "keystroke") {
+          result = await driver.typeText(textPayload || "");
+        } else if (actionType === "notify") {
+          result = await driver.showNotification("OmniOS Pilot", textPayload || "Action executed");
+        } else {
+          // inspect_windows / unknown: nothing destructive to dispatch, just report frontmost app.
+          const frontmost = await driver.getFrontmostApp();
+          result = {
+            action: "inspect_windows",
+            target: frontmost,
+            output: `Frontmost application is ${frontmost}. No mouse/keyboard event dispatched (no destructive action requested).`,
+            success: true,
+            durationMs: 0,
+            driverType: "AppleScript_SystemEvents_Native"
+          };
+        }
+
+        return new Response(JSON.stringify({
+          command: result.action,
+          coordinates: body.coordinates || [0, 0],
+          durationMs: result.durationMs,
+          driverType: result.driverType,
+          output: result.output,
+          success: result.success
+        }), { status: result.success ? 200 : 500, headers });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
       }
@@ -91,6 +156,13 @@ const server = Bun.serve({
     if (url.pathname === "/api/pilot/screenshot" && req.method === "GET") {
       const path = await visionAgent.captureScreen();
       return new Response(JSON.stringify({ screenshotPath: path, timestamp: new Date().toISOString() }), { headers });
+    }
+
+    // 4b. Serve the actual captured screenshot PNG bytes to the browser UI.
+    if (url.pathname === "/api/pilot/screenshot-file" && req.method === "GET") {
+      const p = "/tmp/omnios_live_capture.png";
+      if (!existsSync(p)) return new Response("No screenshot captured yet", { status: 404, headers });
+      return new Response(Bun.file(p), { headers: { "Content-Type": "image/png" } });
     }
 
     // 5. Real Launch App

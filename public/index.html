@@ -22,37 +22,37 @@
           </div>
         </div>
         <div class="topbar-chips">
-          <span class="chip chip-vision">👁️ UI-TARS / ShowUI Grounding</span>
-          <span class="chip chip-driver">🖱️ Native CoreGraphics (8ms)</span>
+          <span class="chip chip-vision">👁️ Local Ollama (moondream) if running, else heuristic-only</span>
+          <span class="chip chip-driver">🖱️ Native AppleScript/System Events</span>
           <span class="chip chip-safety" id="chip-safety-status">🛡️ Safety: Active</span>
-          <span class="chip chip-competitors">📊 5 Top Competitors Tracked</span>
+          <span class="chip chip-competitors">📊 Feature Comparison (no invented scores)</span>
         </div>
       </div>
       <div class="topbar-right">
         <nav class="topbar-tabs">
-          <button class="nav-tab active" data-tab="pilot">🖥️ Live Desktop Vision Pilot</button>
+          <button class="nav-tab active" data-tab="pilot">🖥️ Live Desktop Pilot</button>
           <button class="nav-tab" data-tab="safety">🛡️ Safety & Panic Switch</button>
-          <button class="nav-tab" data-tab="competitors">📊 5 Competitor Matrix</button>
+          <button class="nav-tab" data-tab="competitors">📊 Feature Comparison</button>
         </nav>
       </div>
     </header>
 
     <!-- CONTENT -->
     <main class="app-content">
-      <!-- TAB 1: LIVE DESKTOP VISION PILOT -->
+      <!-- TAB 1: LIVE DESKTOP PILOT -->
       <section id="tab-pilot" class="tab-pane active">
         <div class="pilot-layout-grid">
-          <!-- Left: Live Screen Viewport with Bounding Box Canvas -->
+          <!-- Left: Real Screen Viewport -->
           <div class="panel">
             <div class="panel-header">
-              <span class="panel-title">🖥️ Live Screen Viewport (Visual Grounding Overlay)</span>
-              <span class="badge-nominal" id="badge-grounding-acc">97.4% Accuracy</span>
+              <span class="panel-title">🖥️ Live Screen Viewport (real screencapture, no fake overlay)</span>
+              <span class="badge-nominal" id="badge-grounding-acc">Vision: checking...</span>
             </div>
             <div class="screen-canvas-container">
               <canvas id="screen-viewport-canvas" width="600" height="340"></canvas>
             </div>
             <div style="padding: 14px; display: flex; flex-direction: column; gap: 10px;">
-              <label class="form-label">High-Level Autonomous Desktop Goal:</label>
+              <label class="form-label">High-Level Desktop Goal (keyword-matched, not an ML planner):</label>
               <div style="display: flex; gap: 10px;">
                 <input type="text" id="input-pilot-goal" class="form-control" value="Apri il Finder e cerca la fattura di Agosto">
                 <button class="btn btn-primary" id="btn-plan-action">👁️ Analyze & Plan</button>
@@ -64,8 +64,8 @@
           <!-- Right: Action Plan & Telemetry -->
           <div class="panel">
             <div class="panel-header">
-              <span class="panel-title">📋 Grounding Plan & Step Decomposition</span>
-              <span class="badge-telemetry" id="badge-target-coords">(890, 338) Click</span>
+              <span class="panel-title">📋 Plan (real process list + real/optional vision description)</span>
+              <span class="badge-telemetry" id="badge-target-coords">-</span>
             </div>
             <div class="plan-details-box" id="plan-details-container">
               <!-- Dynamically populated -->
@@ -99,7 +99,7 @@
               <p><strong style="color: #fff;">Regole di Sicurezza di OmniOS-Pilot:</strong></p>
               <p>• <strong>Zero Privileged Deletions:</strong> Nessun comando <code>rm -rf</code> o <code>sudo</code> può essere inviato senza approvazione umana esplicita.</p>
               <p>• <strong>Visual Pre-Flight Confirmation:</strong> I box di puntamento vengono mostrati a schermo prima dell'esecuzione del click.</p>
-              <p>• <strong>100% Privacy Locale:</strong> Il modello visivo e il driver CoreGraphics girano direttamente sul Mac senza inviare catture dello schermo nel cloud.</p>
+              <p>• <strong>100% Privacy Locale:</strong> il driver AppleScript/System Events e (se disponibile) il modello di visione locale via Ollama girano direttamente sul Mac; gli screenshot non vengono mai inviati a servizi cloud.</p>
             </div>
           </div>
         </div>

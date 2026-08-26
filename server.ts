@@ -11,6 +11,7 @@ import { OSCompetitorBenchmark } from "./src/competitor_benchmark";
 import { ActionHistoryLog } from "./src/action_history";
 import { computePixelDiff } from "./src/verification";
 import { GroundingAgent } from "./src/grounding_agent";
+import { AXInspector } from "./src/ax_inspector";
 import { join } from "path";
 import { existsSync } from "fs";
 
@@ -22,6 +23,7 @@ const safety = new SafetyGuard();
 const benchmark = new OSCompetitorBenchmark();
 const history = new ActionHistoryLog();
 const grounding = new GroundingAgent();
+const axInspector = new AXInspector();
 
 /**
  * Reads the REAL logical screen size (points, not pixels) via the same
@@ -377,16 +379,25 @@ const server = Bun.serve({
           upscale: Number(body.upscale) || undefined
         });
 
+        let axCrossCheck: Awaited<ReturnType<AXInspector["crossCheckPoint"]>> | null = null;
         if (result.found && result.screenshotPixel) {
           const [pngSize, logicalSize] = await Promise.all([getPngSize(screenshot), getLogicalScreenSize()]);
           if (pngSize && logicalSize) {
             const converted = GroundingAgent.toClickSpace(result.screenshotPixel, pngSize, logicalSize);
             result.clickPoint = converted.clickPoint;
             result.scaleFactor = converted.scaleFactor;
+            // Real, independent OS-level corroboration: does the real
+            // Accessibility tree confirm an element actually exists near the
+            // vision model's guessed point? See src/ax_inspector.ts. This
+            // never upgrades `result.confidence` itself - it is reported
+            // alongside it so a caller can see when the two real, independent
+            // grounding sources (vision crop-and-reask vs. real AXUIElement
+            // positions) agree or disagree.
+            axCrossCheck = await axInspector.crossCheckPoint(result.clickPoint, keywords, body.process);
           }
         }
 
-        return new Response(JSON.stringify({ screenshotPath: screenshot, ...result }), { headers });
+        return new Response(JSON.stringify({ screenshotPath: screenshot, ...result, axCrossCheck }), { headers });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
       }
@@ -427,6 +438,13 @@ const server = Bun.serve({
         }
         const { clickPoint, scaleFactor } = GroundingAgent.toClickSpace(result.screenshotPixel, pngSize, logicalSize);
 
+        // Real AX-tree cross-check before dispatching the click - see
+        // src/ax_inspector.ts. This does not block the click (the vision
+        // grounding result + safety guard remain the gate), it is surfaced
+        // honestly in the response so the caller can see whether the OS
+        // Accessibility tree corroborated the vision model's guess.
+        const axCrossCheck = await axInspector.crossCheckPoint(clickPoint, keywords, body.process);
+
         const check = safety.evaluateAction("click", [clickPoint.x, clickPoint.y], targetDescription);
         if (!check.isSafe) {
           return new Response(JSON.stringify({ error: check.reason, safetyCheck: check }), { status: 403, headers });
@@ -454,10 +472,30 @@ const server = Bun.serve({
           screenshotPixel: result.screenshotPixel,
           clickPoint,
           scaleFactor,
+          axCrossCheck,
           queriesIssued: result.queriesIssued,
           elapsedMs: result.elapsedMs,
           clickResult
         }), { status: clickResult.success ? 200 : 500, headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
+
+    // 6f. Real Accessibility-tree element enumeration: given a process name
+    // (or the real frontmost process if omitted), returns every real menu
+    // bar item / button / radio button / checkbox macOS's Accessibility API
+    // exposes for it, with real coordinates already in System Events "click
+    // space" - no screenshot, no vision model call, no scale-factor
+    // conversion needed. See src/ax_inspector.ts module header for what was
+    // actually measured working (TextEdit menu bar + window controls) and
+    // what was measured NOT working (Finder toolbar buttons have real
+    // positions but no discoverable label via System Events).
+    if (url.pathname === "/api/pilot/ax-elements" && req.method === "GET") {
+      try {
+        const process = url.searchParams.get("process") || undefined;
+        const result = await axInspector.enumerate(process);
+        return new Response(JSON.stringify(result), { status: result.available ? 200 : 502, headers });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
       }

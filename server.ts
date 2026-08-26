@@ -10,6 +10,7 @@ import { SafetyGuard } from "./src/safety_guard";
 import { OSCompetitorBenchmark } from "./src/competitor_benchmark";
 import { ActionHistoryLog } from "./src/action_history";
 import { computePixelDiff } from "./src/verification";
+import { GroundingAgent } from "./src/grounding_agent";
 import { join } from "path";
 import { existsSync } from "fs";
 
@@ -20,6 +21,41 @@ const driver = new MouseKeyboardDriver();
 const safety = new SafetyGuard();
 const benchmark = new OSCompetitorBenchmark();
 const history = new ActionHistoryLog();
+const grounding = new GroundingAgent();
+
+/**
+ * Reads the REAL logical screen size (points, not pixels) via the same
+ * AppleScript call /api/status already uses. Needed to convert a coordinate
+ * read off a screenshot (which screencapture writes at native/Retina pixel
+ * resolution) into the coordinate space System Events' "click at" expects.
+ * See src/grounding_agent.ts module header for the measured 2x mismatch on
+ * this machine.
+ */
+async function getLogicalScreenSize(): Promise<{ width: number; height: number } | null> {
+  try {
+    const proc = Bun.spawn(["osascript", "-e", 'tell application "Finder" to get bounds of window of desktop'], { stdout: "pipe" });
+    const out = (await new Response(proc.stdout).text()).trim();
+    const parts = out.split(", ").map(Number);
+    if (parts.length === 4 && Number.isFinite(parts[2]) && Number.isFinite(parts[3])) {
+      return { width: parts[2], height: parts[3] };
+    }
+  } catch {}
+  return null;
+}
+
+async function getPngSize(path: string): Promise<{ width: number; height: number } | null> {
+  // Cheap real PNG header parse (IHDR width/height at fixed offsets) - avoids
+  // spawning python3 just to read dimensions the grounding agent already
+  // determined internally; used here only for the click-space conversion.
+  try {
+    const buf = await Bun.file(path).arrayBuffer();
+    const view = new DataView(buf);
+    const width = view.getUint32(16);
+    const height = view.getUint32(20);
+    if (width > 0 && height > 0) return { width, height };
+  } catch {}
+  return null;
+}
 
 /**
  * Real observe-act-verify wrapper around a single driver call: captures a
@@ -306,6 +342,122 @@ const server = Bun.serve({
         }
         const res = await driver.pressKeyCode(keyCode, modifiers);
         return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
+
+    // 6d. Real click-grounding refinement (crop-and-reask): locates a
+    // described UI element on a FRESH real screenshot via GroundingAgent and
+    // returns the estimated coordinate + an honest confidence label, WITHOUT
+    // dispatching any click. See src/grounding_agent.ts for the technique
+    // and its measured real limitations.
+    if (url.pathname === "/api/pilot/locate" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const targetDescription: string = body.targetDescription || "";
+        const keywords: string[] = Array.isArray(body.keywords) && body.keywords.length
+          ? body.keywords
+          : targetDescription.split(/\s+/).filter((w: string) => w.length > 2);
+        if (!targetDescription || keywords.length === 0) {
+          return new Response(JSON.stringify({ error: "targetDescription (and optionally keywords[]) is required" }), { status: 400, headers });
+        }
+
+        const screenshot = await visionAgent.captureScreen("/tmp/omnios_ground_locate.png");
+        if (!screenshot) {
+          return new Response(JSON.stringify({ error: "Real screenshot capture failed" }), { status: 500, headers });
+        }
+
+        const result = await grounding.locate(screenshot, targetDescription, keywords, {
+          coarseRows: Number(body.coarseRows) || undefined,
+          coarseCols: Number(body.coarseCols) || undefined,
+          fineRows: Number(body.fineRows) || undefined,
+          fineCols: Number(body.fineCols) || undefined,
+          upscale: Number(body.upscale) || undefined
+        });
+
+        if (result.found && result.screenshotPixel) {
+          const [pngSize, logicalSize] = await Promise.all([getPngSize(screenshot), getLogicalScreenSize()]);
+          if (pngSize && logicalSize) {
+            const converted = GroundingAgent.toClickSpace(result.screenshotPixel, pngSize, logicalSize);
+            result.clickPoint = converted.clickPoint;
+            result.scaleFactor = converted.scaleFactor;
+          }
+        }
+
+        return new Response(JSON.stringify({ screenshotPath: screenshot, ...result }), { headers });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+      }
+    }
+
+    // 6e. Locate-then-click: runs the same crop-and-reask grounding as
+    // /api/pilot/locate, then - only if a target was actually found - passes
+    // the real safety check and dispatches a real click at the refined
+    // click-space coordinate via MouseKeyboardDriver.clickAt. The response's
+    // "confidence" field ("high"/"low"/"not_found") is carried through
+    // honestly rather than silently proceeding as if grounding were certain;
+    // a "not_found" result is refused (404) rather than clicking a guess.
+    if (url.pathname === "/api/pilot/click-by-description" && req.method === "POST") {
+      try {
+        let body: any = {};
+        try { body = await req.json(); } catch {}
+        const targetDescription: string = body.targetDescription || "";
+        const keywords: string[] = Array.isArray(body.keywords) && body.keywords.length
+          ? body.keywords
+          : targetDescription.split(/\s+/).filter((w: string) => w.length > 2);
+        if (!targetDescription || keywords.length === 0) {
+          return new Response(JSON.stringify({ error: "targetDescription (and optionally keywords[]) is required" }), { status: 400, headers });
+        }
+
+        const screenshot = await visionAgent.captureScreen("/tmp/omnios_ground_click.png");
+        if (!screenshot) {
+          return new Response(JSON.stringify({ error: "Real screenshot capture failed" }), { status: 500, headers });
+        }
+        const result = await grounding.locate(screenshot, targetDescription, keywords);
+
+        if (!result.found || !result.screenshotPixel) {
+          return new Response(JSON.stringify({ error: "Target not found on real screen", confidence: result.confidence, reason: result.reason, coarseGrid: result.coarseGrid }), { status: 404, headers });
+        }
+
+        const [pngSize, logicalSize] = await Promise.all([getPngSize(screenshot), getLogicalScreenSize()]);
+        if (!pngSize || !logicalSize) {
+          return new Response(JSON.stringify({ error: "Could not determine real screen/screenshot dimensions for coordinate conversion" }), { status: 500, headers });
+        }
+        const { clickPoint, scaleFactor } = GroundingAgent.toClickSpace(result.screenshotPixel, pngSize, logicalSize);
+
+        const check = safety.evaluateAction("click", [clickPoint.x, clickPoint.y], targetDescription);
+        if (!check.isSafe) {
+          return new Response(JSON.stringify({ error: check.reason, safetyCheck: check }), { status: 403, headers });
+        }
+
+        const process = body.process as string | undefined;
+        const clickResult = body.double
+          ? await driver.doubleClickAt(clickPoint.x, clickPoint.y, process)
+          : await driver.clickAt(clickPoint.x, clickPoint.y, process);
+
+        history.append({
+          actionType: "click_by_description",
+          target: targetDescription,
+          coordinates: [clickPoint.x, clickPoint.y],
+          success: clickResult.success,
+          output: `${clickResult.output} [grounding confidence: ${result.confidence}]`,
+          durationMs: clickResult.durationMs,
+          safetyRiskLevel: check.riskLevel
+        });
+
+        return new Response(JSON.stringify({
+          targetDescription,
+          confidence: result.confidence,
+          reason: result.reason,
+          screenshotPixel: result.screenshotPixel,
+          clickPoint,
+          scaleFactor,
+          queriesIssued: result.queriesIssued,
+          elapsedMs: result.elapsedMs,
+          clickResult
+        }), { status: clickResult.success ? 200 : 500, headers });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
       }

@@ -21,13 +21,46 @@ let currentPlan = null;
 // "observe -> click -> re-observe" loop the README previously said was missing.
 let lastScreenshotMapping = null; // { scale, dx, dy, realWidth, realHeight }
 
+// REAL BUG FOUND & FIXED (see src/grounding_agent.ts module header for the
+// full measurement): `screencapture` on a Retina Mac writes PNGs at native
+// pixel resolution (measured 3360x2100 on this machine), but macOS System
+// Events' "click at {x,y}" operates in logical POINTS (measured 1680x1050 -
+// exactly half). Before this fix, `realX`/`realY` below - read straight off
+// the screenshot pixels - were sent unconverted to /api/pilot/click, so every
+// click dispatched by clicking the rendered screenshot landed at 2x the
+// intended position on this machine. `screenPointScaleFactor` is fetched
+// once from the real AppleScript-reported screen resolution in /api/status
+// and used to convert before dispatch.
+let screenPointScaleFactor = 1;
+
 document.addEventListener("DOMContentLoaded", () => {
   setupTabs();
   setupPilotActions();
   setupPanicControls();
   setupCanvasClickToRealClick();
   fetchCompetitorMatrix();
+  fetchScreenScaleFactor();
 });
+
+async function fetchScreenScaleFactor() {
+  try {
+    const res = await fetch("/api/status");
+    const data = await res.json();
+    const match = /^(\d+)x(\d+)$/.exec(data.activeScreenResolution || "");
+    if (match && lastScreenshotMapping === null) {
+      // Store the logical resolution now; the actual factor is computed
+      // lazily against whatever real screenshot width shows up later,
+      // since screenshot pixel dims are only known once one is captured.
+      window.__omniosLogicalScreen = { width: Number(match[1]), height: Number(match[2]) };
+    } else if (match) {
+      window.__omniosLogicalScreen = { width: Number(match[1]), height: Number(match[2]) };
+    }
+  } catch {
+    // /api/status unreachable - leave scale factor at 1 (identity); on a
+    // non-Retina display or a machine where screenshot px == logical points
+    // this is still correct.
+  }
+}
 
 function setupTabs() {
   const tabs = document.querySelectorAll(".nav-tab");
@@ -107,15 +140,25 @@ function setupCanvasClickToRealClick() {
     const canvasX = (ev.clientX - rect.left) * (canvas.width / rect.width);
     const canvasY = (ev.clientY - rect.top) * (canvas.height / rect.height);
     const { scale, dx, dy, realWidth, realHeight } = lastScreenshotMapping;
-    const realX = (canvasX - dx) / scale;
-    const realY = (canvasY - dy) / scale;
-    if (realX < 0 || realY < 0 || realX > realWidth || realY > realHeight) {
+    const shotX = (canvasX - dx) / scale;
+    const shotY = (canvasY - dy) / scale;
+    if (shotX < 0 || shotY < 0 || shotX > realWidth || shotY > realHeight) {
       if (terminal) terminal.textContent = "// Click was outside the rendered screenshot area - ignored.";
       return;
     }
 
+    // Convert from SCREENSHOT PIXEL space (shotX/shotY, matching the PNG
+    // screencapture produced) to System Events "click space" (logical
+    // points) using the real logical screen size fetched from /api/status.
+    // See the fetchScreenScaleFactor() comment above: without this, clicks
+    // on a Retina display land at up to 2x the intended position.
+    const logical = window.__omniosLogicalScreen;
+    screenPointScaleFactor = logical && logical.width ? realWidth / logical.width : 1;
+    const realX = shotX / screenPointScaleFactor;
+    const realY = shotY / screenPointScaleFactor;
+
     const targetProcess = currentPlan?.detectedFrontmostApp;
-    if (terminal) terminal.textContent = `// Dispatching REAL click at screen (${Math.round(realX)}, ${Math.round(realY)}) via /api/pilot/click...`;
+    if (terminal) terminal.textContent = `// Dispatching REAL click at screen (${Math.round(realX)}, ${Math.round(realY)}) [screenshot px (${Math.round(shotX)}, ${Math.round(shotY)}) / scale ${screenPointScaleFactor.toFixed(2)}] via /api/pilot/click...`;
 
     try {
       const res = await fetch("/api/pilot/click", {
@@ -126,7 +169,7 @@ function setupCanvasClickToRealClick() {
       const data = await res.json();
       if (terminal) {
         terminal.textContent = res.ok && data.success
-          ? `=== 🖱️ REAL PIXEL CLICK (System Events "click at") ===\n• Screen coords: (${Math.round(realX)}, ${Math.round(realY)})\n• Target process: ${data.target}\n• Latency: ${data.durationMs} ms\n✓ Real click event dispatched to macOS.`
+          ? `=== 🖱️ REAL PIXEL CLICK (System Events "click at") ===\n• Screen coords: (${Math.round(realX)}, ${Math.round(realY)}) [scale ${screenPointScaleFactor.toFixed(2)}]\n• Target process: ${data.target}\n• Latency: ${data.durationMs} ms\n✓ Real click event dispatched to macOS.`
           : `🚨 CLICK FAILED: ${data.output || data.error || "unknown error"}`;
       }
     } catch (e) {

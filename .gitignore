@@ -3,3 +3,6 @@ bun.lockb
 *.log
 .DS_Store
 data/
+
+dist/
+*.bun-build

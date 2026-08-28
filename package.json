@@ -5,7 +5,13 @@
   "type": "module",
   "main": "server.ts",
   "scripts": {
-    "start": "bun server.ts"
+    "start": "bun server.ts",
+    "build": "bun build server.ts --target=bun --outdir dist",
+    "typecheck": "tsc --noEmit"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "typescript": "^7.0.2"
+  }
 }

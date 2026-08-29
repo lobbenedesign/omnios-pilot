@@ -21,6 +21,16 @@ const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 const VISION_MODEL = process.env.OMNIOS_VISION_MODEL || "moondream";
 const PLANNING_MODEL = process.env.OMNIOS_PLANNING_MODEL || "llama3.2:3b";
 
+// Backend selection, previously nonexistent here: every LLM call in this
+// file went straight to the OLLAMA_URL module constant with no indirection
+// at all. LLM_BACKEND=localai (default stays "ollama", unchanged) routes
+// the same two calls through a local LocalAI (github.com/mudler/LocalAI)
+// instance instead, via LOCALAI_URL (default http://localhost:8080).
+function currentLLMBackend(): "ollama" | "localai" {
+  return (process.env.LLM_BACKEND || "ollama").trim().toLowerCase() === "localai" ? "localai" : "ollama";
+}
+const LOCALAI_URL = process.env.LOCALAI_URL || "http://localhost:8080";
+
 export interface RealRunningProcess {
   id: string;
   name: string;
@@ -125,12 +135,16 @@ export class VisionGroundingAgent {
   }
 
   /**
-   * Sends the real captured screenshot to a local Ollama vision model and
-   * returns its genuine textual description. Returns null (not a fabricated
-   * string) if Ollama is unreachable or the model call fails - callers must
-   * surface this honestly instead of pretending grounding happened.
+   * Sends the real captured screenshot to a local vision-language model
+   * (Ollama's native /api/generate with an `images` array, or - with
+   * LLM_BACKEND=localai - a local LocalAI instance's OpenAI-compatible
+   * /v1/chat/completions with an `image_url` content part, the format
+   * OpenAI-vision-shaped APIs expect) and returns its genuine textual
+   * description. Returns null (not a fabricated string) if the backend is
+   * unreachable or the model call fails - callers must surface this
+   * honestly instead of pretending grounding happened.
    */
-  public async describeScreenWithOllama(screenshotPath: string): Promise<{ description: string | null; model: string | null; error?: string }> {
+  public async describeScreen(screenshotPath: string): Promise<{ description: string | null; model: string | null; error?: string }> {
     try {
       const file = Bun.file(screenshotPath);
       if (!(await file.exists())) {
@@ -138,6 +152,34 @@ export class VisionGroundingAgent {
       }
       const bytes = await file.arrayBuffer();
       const base64 = Buffer.from(bytes).toString("base64");
+
+      if (currentLLMBackend() === "localai") {
+        const res = await fetch(`${LOCALAI_URL}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: VISION_MODEL,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "Describe concisely which application windows, menus and UI elements are visible on this desktop screenshot. Focus on anything relevant to automating a click or keystroke." },
+                  { type: "image_url", image_url: { url: `data:image/png;base64,${base64}` } }
+                ]
+              }
+            ],
+            stream: false
+          }),
+          signal: AbortSignal.timeout(45000)
+        });
+
+        if (!res.ok) {
+          return { description: null, model: VISION_MODEL, error: `LocalAI HTTP ${res.status}` };
+        }
+        const data: any = await res.json();
+        const content = (data.choices?.[0]?.message?.content || "").trim();
+        return { description: content || null, model: VISION_MODEL };
+      }
 
       const res = await fetch(`${OLLAMA_URL}/api/generate`, {
         method: "POST",
@@ -157,8 +199,8 @@ export class VisionGroundingAgent {
       const data: any = await res.json();
       return { description: (data.response || "").trim() || null, model: VISION_MODEL };
     } catch (e: any) {
-      // Ollama not running, model not pulled, or timeout - be explicit, never fabricate.
-      return { description: null, model: null, error: e.message || "Ollama unreachable" };
+      // Backend not running, model not pulled, or timeout - be explicit, never fabricate.
+      return { description: null, model: null, error: e.message || `${currentLLMBackend()} unreachable` };
     }
   }
 
@@ -177,7 +219,7 @@ export class VisionGroundingAgent {
     let visionDescription: string | undefined;
     let visionModelUsed: string | null = null;
     if (screenshot) {
-      const vision = await this.describeScreenWithOllama(screenshot);
+      const vision = await this.describeScreen(screenshot);
       if (vision.description) {
         visionDescription = vision.description;
         visionModelUsed = vision.model;
@@ -250,29 +292,52 @@ Rules:
 
 User goal: "${goal}"`;
 
-    try {
-      const res = await fetch(`${OLLAMA_URL}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: PLANNING_MODEL,
-          prompt,
-          stream: false,
-          options: { temperature: 0.2 }
-        }),
-        // Measured on this machine: a cold Ollama model load alone can take
-        // ~24s before the first token, plus prompt/eval time - a 45s budget
-        // (originally copied from the vision-caption timeout) genuinely
-        // timed out on a first real call during testing. 120s gives a cold
-        // load plus this multi-sentence planning prompt real headroom.
-        signal: AbortSignal.timeout(120000)
-      });
+    // Measured on this machine: a cold Ollama model load alone can take
+    // ~24s before the first token, plus prompt/eval time - a 45s budget
+    // (originally copied from the vision-caption timeout) genuinely timed
+    // out on a first real call during testing. 120s gives a cold load plus
+    // this multi-sentence planning prompt real headroom.
+    const planningTimeoutMs = 120000;
+    const backend = currentLLMBackend();
 
-      if (!res.ok) {
-        return { goal, planningModelUsed: null, steps: [], error: `Ollama HTTP ${res.status}` };
+    try {
+      let raw: string;
+
+      if (backend === "localai") {
+        const res = await fetch(`${LOCALAI_URL}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: PLANNING_MODEL,
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.2,
+            stream: false
+          }),
+          signal: AbortSignal.timeout(planningTimeoutMs)
+        });
+        if (!res.ok) {
+          return { goal, planningModelUsed: null, steps: [], error: `LocalAI HTTP ${res.status}` };
+        }
+        const data: any = await res.json();
+        raw = (data.choices?.[0]?.message?.content || "").trim();
+      } else {
+        const res = await fetch(`${OLLAMA_URL}/api/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: PLANNING_MODEL,
+            prompt,
+            stream: false,
+            options: { temperature: 0.2 }
+          }),
+          signal: AbortSignal.timeout(planningTimeoutMs)
+        });
+        if (!res.ok) {
+          return { goal, planningModelUsed: null, steps: [], error: `Ollama HTTP ${res.status}` };
+        }
+        const data: any = await res.json();
+        raw = (data.response || "").trim();
       }
-      const data: any = await res.json();
-      const raw: string = (data.response || "").trim();
 
       // The model may wrap the array in prose or markdown fences despite
       // instructions - extract the first [...] block rather than assuming
@@ -312,7 +377,7 @@ User goal: "${goal}"`;
 
       return { goal, planningModelUsed: PLANNING_MODEL, steps, rawModelOutput: raw };
     } catch (e: any) {
-      return { goal, planningModelUsed: null, steps: [], error: e.message || "Ollama unreachable" };
+      return { goal, planningModelUsed: null, steps: [], error: e.message || `${backend} unreachable` };
     }
   }
 }

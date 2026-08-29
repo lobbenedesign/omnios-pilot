@@ -91,7 +91,7 @@ async function runWithVerification(run: () => Promise<any>) {
   let afterDescription: string | null = null;
   let visionModelUsed: string | null = null;
   if (after) {
-    const vision = await visionAgent.describeScreenWithOllama(after);
+    const vision = await visionAgent.describeScreen(after);
     afterDescription = vision.description;
     visionModelUsed = vision.model;
   }

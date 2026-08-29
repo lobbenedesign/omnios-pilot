@@ -2,6 +2,24 @@
 
 All entries describe what was genuinely verified in this environment, not aspirational claims. See `README.md`'s "Honesty note" for the full history of what was previously fabricated and removed.
 
+## Unreleased (part 2) — optional LocalAI backend for vision description + multi-step planning
+
+**Gap identified:** `src/vision_agent.ts` had zero indirection — both LLM call sites (`describeScreenWithOllama`, `planMultiStep`) fetched `OLLAMA_URL` (a plain module constant) directly, no backend abstraction at all, the most rigid local-provider integration point across this author's related projects.
+
+**What was built:**
+- New `LLM_BACKEND` switch (`ollama` default, unchanged; `localai` targets `LOCALAI_URL`, default `http://localhost:8080`).
+- `describeScreenWithOllama` renamed to `describeScreen` (server.ts call site updated) since it's no longer Ollama-exclusive. On `localai`, the screenshot is sent via LocalAI's OpenAI-compatible vision format (`messages[].content[]` with an `image_url` data-URI part) instead of Ollama's native `images: [base64]` array on `/api/generate` — a real per-backend request shape, not a URL swap.
+- `planMultiStep` branches the same way for the text-planning call (`/v1/chat/completions` vs `/api/generate`), same JSON-array-extraction/schema-filtering logic on both backends, same "never fabricate a plan on failure" policy.
+- `GroundingAgent.locate()` (`src/grounding_agent.ts`, the crop-and-reask coarse-to-fine grid search behind `/api/pilot/locate` and `/api/pilot/click-by-description`) is deliberately **not** touched — it's a larger, separate module, and this change's scope was the two call sites in `vision_agent.ts`. It remains Ollama/`moondream`-only.
+
+**Verified live, not just typechecked:**
+1. `tsc --noEmit` — clean.
+2. `POST /api/pilot/plan` re-run against this machine's real screen/processes with `LLM_BACKEND` unset — real screenshot captured, real `moondream` vision description returned via Ollama, real keyword-heuristic action plan, identical to pre-change behaviour.
+3. Same endpoint re-run with `LLM_BACKEND=localai` and no LocalAI instance running in this environment — `visionDescription` honestly reported "Vision model unavailable (Unable to connect...)" and the plan fell back to the process-list heuristic, no fabricated description.
+4. `VisionGroundingAgent.planMultiStep()` called directly: with `LLM_BACKEND=localai` (LocalAI unreachable) it returned an honest `error` and an empty step list; with the default Ollama backend it produced a real 2-step plan (`activate_app "TextEdit"` → `keystroke "ciao"`) from a live `llama3.2:3b` call, confirming no regression.
+5. No LocalAI instance was available in this environment to verify a real end-to-end LocalAI vision description or plan — implemented against LocalAI's documented/source-confirmed OpenAI-compatible vision and chat request/response shapes, stated explicitly rather than hidden.
+6. `/api/status`'s `groundingModel` field was intentionally left as an Ollama-only reachability check — it reflects `GroundingAgent`'s (untouched) dependency, not `vision_agent.ts`'s, and conflating the two would misreport which subsystem is actually configured for which backend.
+
 ## Unreleased — real Accessibility-tree (AXUIElement) element locator + vision cross-check
 
 **Gap identified:** the previous entry below explicitly noted "There is no Set-of-Marks / Accessibility-API element enumeration in this iteration (considered, not implemented)." Vision-based grounding (`GroundingAgent`) has no independent way to know when `moondream` hallucinates a plausible-but-wrong element - the false-positive case documented below (a "search bar" that didn't exist, agreed on across both coarse and fine stages) is exactly the failure a non-vision cross-check can catch.
